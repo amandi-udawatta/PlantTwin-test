@@ -17,15 +17,23 @@ import type { PlantLogRow } from "@/types/plantLog";
 
 export const runtime = "nodejs";
 
+const MAX_IMAGE_BASE64_LENGTH = 6_000_000;
+
 function isAnalyzePlantRequest(value: unknown): value is AnalyzePlantRequest {
   if (typeof value !== "object" || value === null) {
     return false;
   }
   const record = value as Record<string, unknown>;
+  const imageOk =
+    record.plantImageBase64 === undefined ||
+    (typeof record.plantImageBase64 === "string" &&
+      record.plantImageMimeType !== undefined &&
+      typeof record.plantImageMimeType === "string");
   return (
     typeof record.plantName === "string" &&
     (record.species === undefined || typeof record.species === "string") &&
-    typeof record.city === "string"
+    typeof record.city === "string" &&
+    imageOk
   );
 }
 
@@ -105,10 +113,19 @@ export async function POST(
       );
     }
 
+    const imageBase64 = parsedRequest.body.plantImageBase64?.trim();
+    const imageMimeType = parsedRequest.body.plantImageMimeType?.trim();
+
+    if (imageBase64 && imageBase64.length > MAX_IMAGE_BASE64_LENGTH) {
+      return validationError("Plant image is too large. Use a smaller photo.");
+    }
+
     const analysis = await analyzePlantHealth({
       plantName,
       species,
       weatherContext: weather.contextText,
+      imageBase64: imageBase64 || undefined,
+      imageMimeType: imageMimeType || undefined,
     });
 
     const log: PlantLogRow = await insertPlantLog({

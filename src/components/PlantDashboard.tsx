@@ -1,9 +1,12 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import ImageDropzone, { type PlantImageSelection } from "@/components/ImageDropzone";
+import PlantHistoryList from "@/components/PlantHistoryList";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type {
   AnalyzePlantErrorResponse,
   AnalyzePlantResponse,
+  PlantLogsListResponse,
 } from "@/types/analyze";
 import type { PlantLogRow } from "@/types/plantLog";
 
@@ -48,6 +51,17 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+interface FormFieldProps {
+  id: string;
+  label: string;
+  name: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+  required?: boolean;
+}
+
 function FormField({
   id,
   label,
@@ -57,16 +71,7 @@ function FormField({
   onChange,
   disabled,
   required = false,
-}: {
-  id: string;
-  label: string;
-  name: string;
-  placeholder: string;
-  value: string;
-  onChange: (value: string) => void;
-  disabled: boolean;
-  required?: boolean;
-}) {
+}: FormFieldProps) {
   return (
     <div>
       <label htmlFor={id} className="mb-1.5 block text-sm text-botanical-muted">
@@ -89,12 +94,18 @@ function FormField({
 
 function EmptyState() {
   return (
+    <MotionEmptyState />
+  );
+}
+
+function MotionEmptyState() {
+  return (
     <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-botanical-border/80 bg-botanical-bg/50 px-6 py-16 text-center">
       <p className="mb-3 text-4xl opacity-40" aria-hidden>
         🌿
       </p>
       <p className="text-sm text-botanical-muted">
-        No analysis yet. Run an ingestion to see results.
+        No analysis yet. Run an ingestion or select a saved plant.
       </p>
     </div>
   );
@@ -107,17 +118,11 @@ function LoadingState() {
       aria-live="polite"
       aria-busy="true"
     >
-      <LoadingSpinner />
+      <div className="mb-4 h-8 w-8 animate-spin rounded-full border-2 border-botanical-border border-t-botanical-accent" />
       <p className="text-sm text-botanical-muted">
-        Fetching weather, running AI analysis, and saving…
+        One request: weather → AI → save…
       </p>
     </div>
-  );
-}
-
-function LoadingSpinner() {
-  return (
-    <div className="mb-4 h-8 w-8 animate-spin rounded-full border-2 border-botanical-border border-t-botanical-accent" />
   );
 }
 
@@ -137,15 +142,7 @@ function ResultsContent({ log }: { log: PlantLogRow }) {
       ) : null}
 
       <div className="rounded-xl border border-botanical-border/80 bg-botanical-bg/50 p-5">
-        <div className="flex items-start justify-between gap-4">
-          <PlantTitle log={log} />
-          <div className="text-right">
-            <p className="text-xs text-botanical-muted">Score</p>
-            <p className={`text-3xl font-bold tabular-nums ${scoreClass}`}>
-              {log.health_score}
-            </p>
-          </div>
-        </div>
+        <ResultsHeader log={log} scoreClass={scoreClass} />
         <p className="mt-4 text-sm leading-relaxed text-botanical-leaf/90">
           {log.summary}
         </p>
@@ -193,13 +190,37 @@ function ResultsContent({ log }: { log: PlantLogRow }) {
   );
 }
 
-function PlantTitle({ log }: { log: PlantLogRow }) {
+function ResultsHeader({
+  log,
+  scoreClass,
+}: {
+  log: PlantLogRow;
+  scoreClass: string;
+}) {
   return (
-    <div>
-      <h3 className="text-lg font-semibold text-white">{log.plant_name}</h3>
-      <p className="mt-0.5 text-xs text-botanical-muted">
-        ID {log.id.slice(0, 8)}…
-      </p>
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        <h3 className="text-lg font-semibold text-white">{log.plant_name}</h3>
+        <p className="mt-0.5 text-xs text-botanical-muted">
+          ID {log.id.slice(0, 8)}…
+        </p>
+      </div>
+      <ScoreBadge score={log.health_score} scoreClass={scoreClass} />
+    </div>
+  );
+}
+
+function ScoreBadge({
+  score,
+  scoreClass,
+}: {
+  score: number;
+  scoreClass: string;
+}) {
+  return (
+    <div className="text-right">
+      <p className="text-xs text-botanical-muted">Score</p>
+      <p className={`text-3xl font-bold tabular-nums ${scoreClass}`}>{score}</p>
     </div>
   );
 }
@@ -224,7 +245,7 @@ async function parseAnalyzeResponse(
     payload = JSON.parse(rawText);
   } catch {
     console.error(
-      "[PlantDashboard] Non-JSON response:",
+      "[PlantDashboard] Non-JSON analyze response:",
       response.status,
       rawText.slice(0, 200),
     );
@@ -240,7 +261,7 @@ async function parseAnalyzeResponse(
       typeof errorPayload.error === "string" && errorPayload.error.length > 0
         ? errorPayload.error
         : `Analysis failed (HTTP ${response.status}).`;
-    console.error("[PlantDashboard] API error:", response.status, message);
+    console.error("[PlantDashboard] Analyze API error:", response.status, message);
     return { ok: false, error: message };
   }
 
@@ -251,7 +272,6 @@ async function parseAnalyzeResponse(
     !successPayload.log ||
     typeof successPayload.log.id !== "string"
   ) {
-    console.error("[PlantDashboard] Unexpected success payload:", payload);
     return {
       ok: false,
       error: "Server returned an unexpected response shape.",
@@ -261,126 +281,228 @@ async function parseAnalyzeResponse(
   return { ok: true, data: successPayload };
 }
 
+async function fetchPlantLogs(): Promise<
+  | { ok: true; logs: PlantLogRow[] }
+  | { ok: false; error: string }
+> {
+  const response = await fetch("/api/plants", { cache: "no-store" });
+  const rawText = await response.text();
+
+  if (!rawText.trim()) {
+    return { ok: false, error: "Could not load plant history (empty response)." };
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(rawText);
+  } catch {
+    return { ok: false, error: "Could not load plant history (invalid JSON)." };
+  }
+
+  if (!response.ok) {
+    const err = payload as AnalyzePlantErrorResponse;
+    return {
+      ok: false,
+      error: err.error ?? `Could not load plant history (HTTP ${response.status}).`,
+    };
+  }
+
+  const data = payload as PlantLogsListResponse;
+  if (!Array.isArray(data.logs)) {
+    return { ok: false, error: "Unexpected plant history response." };
+  }
+
+  return { ok: true, logs: data.logs };
+}
+
 export default function PlantDashboard() {
   const [plantName, setPlantName] = useState("");
   const [species, setSpecies] = useState("");
   const [city, setCity] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [imageSelection, setImageSelection] = useState<PlantImageSelection | null>(
+    null,
+  );
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
   const [result, setResult] = useState<PlantLogRow | null>(null);
+  const [plantLogs, setPlantLogs] = useState<PlantLogRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  const analyzeInFlightRef = useRef(false);
+  const historyLoadedRef = useRef(false);
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    const loaded = await fetchPlantLogs();
+    if (loaded.ok) {
+      setPlantLogs(loaded.logs);
+    } else {
+      setHistoryError(loaded.error);
+      console.error("[PlantDashboard] History load failed:", loaded.error);
+    }
+    setHistoryLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (historyLoadedRef.current) {
+      return;
+    }
+    historyLoadedRef.current = true;
+    void loadHistory();
+  }, [loadHistory]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setError(null);
-    setIsLoading(true);
+
+    if (analyzeInFlightRef.current || isAnalyzing) {
+      return;
+    }
+
+    analyzeInFlightRef.current = true;
+    setAnalyzeError(null);
+    setIsAnalyzing(true);
 
     try {
+      const body: Record<string, string | undefined> = {
+        plantName: plantName.trim(),
+        species: species.trim() || undefined,
+        city: city.trim(),
+      };
+
+      if (imageSelection) {
+        body.plantImageBase64 = imageSelection.base64;
+        body.plantImageMimeType = imageSelection.mimeType;
+      }
+
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          plantName: plantName.trim(),
-          species: species.trim() || undefined,
-          city: city.trim(),
-        }),
+        body: JSON.stringify(body),
       });
 
       const parsed = await parseAnalyzeResponse(response);
 
       if (!parsed.ok) {
-        setError(parsed.error);
+        setAnalyzeError(parsed.error);
         return;
       }
 
-      setResult(parsed.data.log);
+      const newLog = parsed.data.log;
+      setResult(newLog);
+      setPlantLogs((previous) => {
+        const withoutDuplicate = previous.filter((row) => row.id !== newLog.id);
+        return [newLog, ...withoutDuplicate];
+      });
     } catch (submitError) {
       const message =
         submitError instanceof Error
           ? submitError.message
           : "Network error — could not reach the analysis service.";
       console.error("[PlantDashboard] Submit failed:", message);
-      setError(message);
+      setAnalyzeError(message);
     } finally {
-      setIsLoading(false);
+      setIsAnalyzing(false);
+      analyzeInFlightRef.current = false;
     }
   }
 
   return (
-    <div className="mx-auto grid max-w-7xl gap-6 px-6 py-8 lg:grid-cols-2">
-      <section className="panel">
-        <h2 className="mb-1 text-lg font-medium text-white">Plant Ingestion</h2>
-        <p className="mb-6 text-sm text-botanical-muted">
-          Submit plant details and location to generate an AI health report.
-        </p>
+    <div className="mx-auto max-w-7xl space-y-6 px-6 py-8">
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className="panel">
+          <h2 className="mb-1 text-lg font-medium text-white">Plant Ingestion</h2>
+          <p className="mb-6 text-sm text-botanical-muted">
+            One submit = one weather fetch, one AI call, one database save.
+          </p>
 
-        <form
-          className="space-y-4"
-          aria-label="Plant ingestion form"
-          onSubmit={handleSubmit}
-        >
-          <FormField
-            id="plant-name"
-            label="Plant name"
-            name="plantName"
-            placeholder="e.g. Monstera Deliciosa"
-            value={plantName}
-            onChange={setPlantName}
-            disabled={isLoading}
-            required
-          />
-          <FormField
-            id="species"
-            label="Species"
-            name="species"
-            placeholder="e.g. Monstera deliciosa"
-            value={species}
-            onChange={setSpecies}
-            disabled={isLoading}
-          />
-          <FormField
-            id="city"
-            label="City (weather context)"
-            name="city"
-            placeholder="e.g. London"
-            value={city}
-            onChange={setCity}
-            disabled={isLoading}
-            required
-          />
-
-          {error ? (
-            <p
-              role="alert"
-              className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300"
-            >
-              {error}
-            </p>
-          ) : null}
-
-          <button
-            type="submit"
-            className="btn-primary w-full"
-            disabled={isLoading}
+          <form
+            className="space-y-4"
+            aria-label="Plant ingestion form"
+            onSubmit={handleSubmit}
           >
-            {isLoading ? "Analyzing…" : "Analyze plant health"}
-          </button>
-        </form>
-      </section>
+            <FormField
+              id="plant-name"
+              label="Plant name"
+              name="plantName"
+              placeholder="e.g. Monstera Deliciosa"
+              value={plantName}
+              onChange={setPlantName}
+              disabled={isAnalyzing}
+              required
+            />
+            <FormField
+              id="species"
+              label="Species"
+              name="species"
+              placeholder="e.g. Monstera deliciosa"
+              value={species}
+              onChange={setSpecies}
+              disabled={isAnalyzing}
+            />
+            <FormField
+              id="city"
+              label="City (weather context)"
+              name="city"
+              placeholder="e.g. London"
+              value={city}
+              onChange={setCity}
+              disabled={isAnalyzing}
+              required
+            />
 
-      <section className="panel flex flex-col">
-        <h2 className="mb-1 text-lg font-medium text-white">Health Report</h2>
-        <p className="mb-6 text-sm text-botanical-muted">
-          Live metrics and AI recommendations from your latest analysis.
-        </p>
+            <ImageDropzone
+              selection={imageSelection}
+              onSelectionChange={setImageSelection}
+              disabled={isAnalyzing}
+            />
 
-        {isLoading ? (
-          <LoadingState />
-        ) : result ? (
-          <ResultsContent log={result} />
-        ) : (
-          <EmptyState />
-        )}
-      </section>
+            {analyzeError ? (
+              <p
+                role="alert"
+                className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-300"
+              >
+                {analyzeError}
+              </p>
+            ) : null}
+
+            <button
+              type="submit"
+              className="btn-primary w-full"
+              disabled={isAnalyzing}
+            >
+              {isAnalyzing ? "Analyzing…" : "Analyze plant health"}
+            </button>
+          </form>
+        </section>
+
+        <section className="panel flex flex-col">
+          <h2 className="mb-1 text-lg font-medium text-white">Health Report</h2>
+          <p className="mb-6 text-sm text-botanical-muted">
+            Latest analysis or a plant selected from history.
+          </p>
+
+          {isAnalyzing ? (
+            <LoadingState />
+          ) : result ? (
+            <ResultsContent log={result} />
+          ) : (
+            <EmptyState />
+          )}
+        </section>
+      </div>
+
+      <PlantHistoryList
+        logs={plantLogs}
+        selectedId={result?.id ?? null}
+        isLoading={historyLoading}
+        error={historyError}
+        onSelect={(log) => {
+          setResult(log);
+          setAnalyzeError(null);
+        }}
+      />
     </div>
   );
 }
