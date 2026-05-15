@@ -4,6 +4,9 @@ export interface AnalyzePlantRequest {
   plantName: string;
   species?: string;
   city: string;
+  /** Base64 image without data-URL prefix (optional). */
+  plantImageBase64?: string;
+  plantImageMimeType?: string;
 }
 
 export interface AnalyzePlantResponse {
@@ -12,4 +15,8 @@ export interface AnalyzePlantResponse {
 
 export interface AnalyzePlantErrorResponse {
   error: string;
+}
+
+export interface PlantLogsListResponse {
+  logs: PlantLogRow[];
 }
