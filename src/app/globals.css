@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-botanical-bg text-botanical-leaf antialiased;
+  }
+
+  ::selection {
+    @apply bg-botanical-accent/30 text-white;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-botanical-border bg-botanical-surface/80 p-6 shadow-lg shadow-black/20 backdrop-blur-sm;
+  }
+
+  .input-field {
+    @apply w-full rounded-lg border border-botanical-border bg-botanical-bg px-4 py-2.5 text-botanical-leaf placeholder:text-botanical-muted/60 outline-none transition focus:border-botanical-accent focus:ring-1 focus:ring-botanical-accent;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-lg bg-botanical-accent px-5 py-2.5 font-medium text-botanical-bg transition hover:bg-botanical-leaf disabled:cursor-not-allowed disabled:opacity-50;
+  }
+}
